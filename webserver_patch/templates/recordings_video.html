@@ -1,0 +1,58 @@
+<!-- Status badge — polls /api/status every 2 seconds -->
+<div id="status-badge" style="
+  display: inline-block;
+  padding: 6px 14px;
+  border-radius: 9999px;
+  font-family: monospace;
+  font-size: 0.9rem;
+  font-weight: bold;
+  background: #111827;
+  color: #6b7280;
+  margin-bottom: 1rem;
+">● IDLE</div>
+
+<script>
+  (function () {
+    const badge = document.getElementById('status-badge');
+    const labels = {
+      idle:      '● IDLE',
+      recording: '⏺ RECORDING',
+      saving:    '💾 SAVING',
+      unknown:   '? UNKNOWN',
+    };
+    const colors = {
+      idle:      '#6b7280',
+      recording: '#ef4444',
+      saving:    '#f59e0b',
+      unknown:   '#6b7280',
+    };
+
+    async function poll() {
+      try {
+        const r = await fetch('/api/status');
+        const { status } = await r.json();
+        badge.textContent = labels[status] ?? status.toUpperCase();
+        badge.style.color  = colors[status]  ?? '#6b7280';
+      } catch (_) {
+        badge.textContent = labels.unknown;
+        badge.style.color  = colors.unknown;
+      }
+    }
+
+    poll();
+    setInterval(poll, 2000);
+  })();
+</script>
+
+<!-- Video player column — include this alongside the existing audio player -->
+{% if session.video %}
+<div class="video-player" style="margin-top: 1rem;">
+  <video controls style="max-width: 100%; border-radius: 8px;">
+    <source src="{{ session.video_url }}" type="video/mp4">
+    Tu navegador no soporta video HTML5.
+  </video>
+  <p style="font-size: 0.75rem; color: #9ca3af; margin-top: 4px;">
+    {{ session.timestamp }} — {{ session.duration }}
+  </p>
+</div>
+{% endif %}
