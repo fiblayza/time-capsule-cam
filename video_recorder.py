@@ -40,11 +40,17 @@ _recording_proc = None       # ffmpeg subprocess
 _picamera = None             # picamera2 instance
 _recording_start = None      # epoch float
 _current_file = None         # Path of the file being written
+_led_pin = None              # BCM pin for recording LED (None = disabled)
 
 
 def set_status(state: str):
     STATUS_PATH.write_text(json.dumps({"status": state}))
     log.info("Status → %s", state)
+
+
+def set_led(on: bool):
+    if GPIO_AVAILABLE and _led_pin is not None:
+        GPIO.output(_led_pin, GPIO.HIGH if on else GPIO.LOW)
 
 
 def load_config() -> dict:
@@ -66,6 +72,7 @@ def load_config() -> dict:
             "min_duration_seconds": 2,
             "codec": "libx264",
             "preset": "ultrafast",
+            "led_gpio": 17,
         },
     }
 
@@ -190,10 +197,12 @@ def make_hook_callback(cfg: dict):
         if _is_off_hook(val, hook_type):
             log.info("Off-hook detected")
             set_status("recording")
+            set_led(True)
             try:
                 start_recording(cfg)
             except Exception as e:
                 log.error("start_recording failed: %s", e)
+                set_led(False)
                 set_status("idle")
         else:
             log.info("On-hook detected")
@@ -202,17 +211,26 @@ def make_hook_callback(cfg: dict):
             except Exception as e:
                 log.error("stop_recording failed: %s", e)
                 set_status("idle")
+            finally:
+                set_led(False)
 
     return callback
 
 
 def setup_gpio(cfg: dict):
-    gpio_pin = cfg.get("hook_gpio", 11)
+    global _led_pin
+    hook_pin = cfg.get("hook_gpio", 22)
     GPIO.setmode(GPIO.BCM)
-    GPIO.setup(gpio_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(hook_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     callback = make_hook_callback(cfg)
-    GPIO.add_event_detect(gpio_pin, GPIO.BOTH, callback=callback, bouncetime=DEBOUNCE_MS)
-    log.info("GPIO %d watching for hook events", gpio_pin)
+    GPIO.add_event_detect(hook_pin, GPIO.BOTH, callback=callback, bouncetime=DEBOUNCE_MS)
+    log.info("GPIO %d watching for hook events", hook_pin)
+
+    led = cfg.get("video", {}).get("led_gpio", 0)
+    if led:
+        _led_pin = led
+        GPIO.setup(_led_pin, GPIO.OUT, initial=GPIO.LOW)
+        log.info("GPIO %d configured as recording LED", _led_pin)
 
 
 def shutdown(signum, frame):
@@ -220,6 +238,7 @@ def shutdown(signum, frame):
     if _recording_proc or _picamera:
         cfg = load_config()
         stop_recording(cfg)
+    set_led(False)
     if GPIO_AVAILABLE:
         GPIO.cleanup()
     set_status("idle")

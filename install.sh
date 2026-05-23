@@ -74,6 +74,7 @@ video:
   min_duration_seconds: 2
   codec: libx264
   preset: ultrafast
+  led_gpio: 17             # BCM pin for recording LED; 0 to disable
 EOF
     ok "config.yaml updated"
 fi
