@@ -78,12 +78,20 @@ EOF
     ok "config.yaml updated"
 fi
 
-# ── 6. Patch upstream webserver ───────────────────────────────────────────────
+# ── 6. Create status.json if it doesn't exist ────────────────────────────────
+STATUS_JSON="${INSTALL_DIR}/status.json"
+if [ ! -f "$STATUS_JSON" ]; then
+    log "Creating status.json..."
+    echo '{"status": "idle"}' > "$STATUS_JSON"
+    ok "status.json created"
+fi
+
+# ── 8. Patch upstream webserver ───────────────────────────────────────────────
 log "Patching upstream webserver/server.py..."
 python3 "${INSTALL_DIR}/webserver_patch/apply_patch.py"
 ok "Webserver patched"
 
-# ── 7. Install and start systemd service ──────────────────────────────────────
+# ── 9. Install and start systemd service ──────────────────────────────────────
 log "Installing systemd service..."
 sudo cp "${INSTALL_DIR}/video_recorder.service" /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -91,7 +99,7 @@ sudo systemctl enable "${SERVICE_NAME}.service"
 sudo systemctl restart "${SERVICE_NAME}.service"
 ok "video_recorder.service active"
 
-# ── 8. Restart upstream webserver ─────────────────────────────────────────────
+# ── 10. Restart upstream webserver ────────────────────────────────────────────
 log "Restarting audioGuestBookWebServer..."
 sudo systemctl restart audioGuestBookWebServer.service
 ok "Webserver restarted"
