@@ -5,6 +5,8 @@ import yaml
 import logging
 import signal
 import sys
+import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -32,10 +34,10 @@ log = logging.getLogger(__name__)
 CONFIG_PATH = Path(__file__).parent.parent / "rotary-phone-audio-guestbook" / "config.yaml"
 RECORDINGS_DIR_FALLBACK = Path(__file__).parent.parent / "recordings"
 STATUS_PATH = Path(__file__).parent / "status.json"
-RECORDINGS_DIR = None  # resolved from config at runtime
 
 DEBOUNCE_MS = 200
 _last_event_time = 0.0
+_last_stop_time = 0.0        # monotonic time of last stop, for cooldown
 _recording_proc = None       # ffmpeg subprocess
 _picamera = None             # picamera2 instance
 _recording_start = None      # epoch float
@@ -70,6 +72,7 @@ def load_config() -> dict:
             "resolution": "1280x720",
             "fps": 25,
             "min_duration_seconds": 2,
+            "min_gap_seconds": 1.0,
             "codec": "libx264",
             "preset": "ultrafast",
             "led_gpio": 17,
@@ -84,6 +87,10 @@ def _timestamp() -> str:
 def start_recording(cfg: dict):
     global _recording_proc, _picamera, _recording_start, _current_file
 
+    if _recording_proc is not None or _picamera is not None:
+        log.warning("start_recording called while already recording — ignoring")
+        return
+
     recordings_dir = Path(cfg.get("recordings_path", str(RECORDINGS_DIR_FALLBACK)))
     recordings_dir.mkdir(parents=True, exist_ok=True)
     ts = _timestamp()
@@ -96,6 +103,8 @@ def start_recording(cfg: dict):
     if backend == "picamera":
         if not PICAMERA2_AVAILABLE:
             log.error("picamera2 not installed — cannot record")
+            _current_file = None
+            _recording_start = None
             return
         width, height = map(int, vcfg.get("resolution", "1280x720").split("x"))
         fps = int(vcfg.get("fps", 25))
@@ -134,7 +143,11 @@ def start_recording(cfg: dict):
 
 
 def stop_recording(cfg: dict):
-    global _recording_proc, _picamera, _recording_start, _current_file
+    global _recording_proc, _picamera, _recording_start, _current_file, _last_stop_time
+
+    if _recording_proc is None and _picamera is None and _current_file is None:
+        log.warning("stop_recording called but nothing was recording — ignoring")
+        return
 
     set_status("saving")
     duration = time.monotonic() - (_recording_start or 0)
@@ -161,18 +174,94 @@ def stop_recording(cfg: dict):
         finally:
             _recording_proc = None
 
-    if _current_file and duration < min_dur:
-        log.info("Recording too short (%.1fs < %ds) — deleting %s", duration, min_dur, _current_file)
+    saved_file = _current_file
+
+    if saved_file and duration < min_dur:
+        log.info("Recording too short (%.1fs < %ds) — deleting %s", duration, min_dur, saved_file)
         try:
-            _current_file.unlink(missing_ok=True)
+            saved_file.unlink(missing_ok=True)
         except Exception as e:
             log.error("Could not delete short recording: %s", e)
+        saved_file = None
     else:
-        log.info("Recording saved: %s (%.1fs)", _current_file, duration)
+        log.info("Recording saved: %s (%.1fs)", saved_file, duration)
 
     _current_file = None
     _recording_start = None
+    _last_stop_time = time.monotonic()
     set_status("idle")
+
+    if saved_file:
+        threading.Thread(target=_post_process, args=(saved_file,), daemon=True).start()
+
+
+def _find_usb_mounts() -> list:
+    media = Path("/media/admin")
+    if not media.exists():
+        return []
+    mounts = {Path(line.split()[1]) for line in Path("/proc/mounts").read_text().splitlines()}
+    return [p for p in media.iterdir() if p.is_dir() and p in mounts]
+
+
+def _generate_thumbnail(video_path: Path):
+    thumb_path = video_path.with_suffix(".jpg")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-ss", "1",
+                "-i", str(video_path),
+                "-vframes", "1",
+                "-q:v", "2",
+                str(thumb_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        if thumb_path.exists():
+            log.info("Thumbnail saved: %s", thumb_path.name)
+        else:
+            log.warning("Thumbnail generation produced no output for %s", video_path.name)
+    except Exception as e:
+        log.error("Thumbnail failed: %s", e)
+
+
+def _copy_to_usb(video_path: Path):
+    time.sleep(3)  # give upstream audioGuestBook time to finish writing the .wav
+
+    mounts = _find_usb_mounts()
+    if not mounts:
+        log.info("No USB drives mounted — skipping backup")
+        return
+
+    stem = video_path.stem
+    recordings_dir = video_path.parent
+    candidates = [
+        video_path,
+        video_path.with_suffix(".jpg"),
+        recordings_dir / f"{stem}.wav",
+    ]
+    files = [f for f in candidates if f.exists()]
+
+    for mount in mounts:
+        dest_dir = mount / "time-capsule-cam"
+        try:
+            dest_dir.mkdir(exist_ok=True)
+        except Exception as e:
+            log.error("Cannot create backup dir on %s: %s", mount, e)
+            continue
+        for f in files:
+            try:
+                shutil.copy2(f, dest_dir / f.name)
+                log.info("USB backup: %s → %s", f.name, mount.name)
+            except Exception as e:
+                log.error("USB copy failed (%s): %s", f.name, e)
+
+
+def _post_process(video_path: Path):
+    _generate_thumbnail(video_path)
+    _copy_to_usb(video_path)
 
 
 def _is_off_hook(gpio_val: int, hook_type: str) -> bool:
@@ -195,6 +284,10 @@ def make_hook_callback(cfg: dict):
 
         val = GPIO.input(channel)
         if _is_off_hook(val, hook_type):
+            cooldown = cfg.get("video", {}).get("min_gap_seconds", 1.0)
+            if time.monotonic() - _last_stop_time < cooldown:
+                log.warning("Off-hook ignored — cooldown active, wait %.1fs", cooldown)
+                return
             log.info("Off-hook detected")
             set_status("recording")
             set_led(True)

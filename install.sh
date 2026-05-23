@@ -39,7 +39,8 @@ ok "Upstream found"
 # ── 2. Clone or update our extension ─────────────────────────────────────────
 if [ -d "${INSTALL_DIR}/.git" ]; then
     log "Updating existing installation..."
-    git -C "$INSTALL_DIR" pull --ff-only
+    git -C "$INSTALL_DIR" fetch origin
+    git -C "$INSTALL_DIR" reset --hard origin/main
     ok "Updated to $(git -C "$INSTALL_DIR" rev-parse --short HEAD)"
 else
     log "Cloning time-capsule-cam → ${INSTALL_DIR} ..."
@@ -72,6 +73,7 @@ video:
   resolution: "1280x720"
   fps: 25
   min_duration_seconds: 2
+  min_gap_seconds: 1.0         # cooldown between recordings (seconds)
   codec: libx264
   preset: ultrafast
   led_gpio: 17             # BCM pin for recording LED; 0 to disable
@@ -87,12 +89,12 @@ if [ ! -f "$STATUS_JSON" ]; then
     ok "status.json created"
 fi
 
-# ── 8. Patch upstream webserver ───────────────────────────────────────────────
+# ── 7. Patch upstream webserver ───────────────────────────────────────────────
 log "Patching upstream webserver/server.py..."
 python3 "${INSTALL_DIR}/webserver_patch/apply_patch.py"
 ok "Webserver patched"
 
-# ── 9. Install and start systemd service ──────────────────────────────────────
+# ── 8. Install and start systemd service ──────────────────────────────────────
 log "Installing systemd service..."
 sudo cp "${INSTALL_DIR}/video_recorder.service" /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -100,7 +102,7 @@ sudo systemctl enable "${SERVICE_NAME}.service"
 sudo systemctl restart "${SERVICE_NAME}.service"
 ok "video_recorder.service active"
 
-# ── 10. Restart upstream webserver ────────────────────────────────────────────
+# ── 9. Restart upstream webserver ─────────────────────────────────────────────
 log "Restarting audioGuestBookWebServer..."
 sudo systemctl restart audioGuestBookWebServer.service
 ok "Webserver restarted"

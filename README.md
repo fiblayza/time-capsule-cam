@@ -47,6 +47,7 @@ video:
   min_duration_seconds: 2
   codec: libx264
   preset: ultrafast
+  led_gpio: 17           # BCM pin for recording LED; 0 to disable
 ```
 
 Then restart the sidecar:
@@ -68,6 +69,36 @@ Lift the handset → status becomes `recording`, an `.mp4` appears in `/recordin
 Hang up → status goes `saving` → `idle`, file is complete.
 
 The web panel at `http://<PI_IP>:8080` shows a live status badge (polls every 2 s).
+
+---
+
+## USB backup
+
+If a USB drive is connected, each session (`.mp4` + `.wav`) is automatically copied to it after the handset is hung up. Works with any drive formatted as **exFAT** or FAT32 — no configuration needed, the Pi auto-mounts it under `/media/admin/<LABEL>`.
+
+Files are copied to a `time-capsule-cam/` folder on the drive. Multiple drives are supported; if none is connected the backup is silently skipped.
+
+A 3-second delay is applied before copying to ensure the upstream audio process has finished writing the `.wav`.
+
+---
+
+## Thumbnails
+
+A JPEG thumbnail (`.jpg`, same name as the recording) is extracted from the first second of each video automatically. The web panel can use it to preview sessions without loading the full video.
+
+---
+
+## Recording LED
+
+An optional LED lights up while a guest is recording and turns off when they hang up.
+
+**Wiring** (BCM pin 17 by default):
+
+```
+Pi GPIO 17 ──── 220Ω resistor ──── LED (+) ──── LED (−) ──── GND
+```
+
+Change the pin in `config.yaml` (`led_gpio: <pin>`), or set `led_gpio: 0` to disable it entirely.
 
 ---
 
