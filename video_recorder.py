@@ -1,3 +1,4 @@
+import os
 import subprocess
 import json
 import time
@@ -247,11 +248,46 @@ def _stop_recording_locked(cfg: dict):
 
 
 def _find_usb_mounts() -> list:
-    media = Path("/media/admin")
-    if not media.exists():
+    """USB partitions ready to receive the backup, mounting them ourselves
+    if needed — the headless image has no automounter, and we run as root."""
+    try:
+        lsblk = subprocess.run(
+            ["lsblk", "-J", "-o", "NAME,TYPE,TRAN,RM,MOUNTPOINT"],
+            capture_output=True, text=True, timeout=10,
+        )
+        info = json.loads(lsblk.stdout)
+    except Exception as e:
+        log.error("lsblk failed: %s", e)
         return []
-    mounts = {Path(line.split()[1]) for line in Path("/proc/mounts").read_text().splitlines()}
-    return [p for p in media.iterdir() if p.is_dir() and p in mounts]
+
+    mounts = []
+    for disk in info.get("blockdevices", []):
+        if disk.get("tran") != "usb":
+            continue
+        # partitions if the stick has them, the bare disk if not
+        for part in disk.get("children") or [disk]:
+            mp = part.get("mountpoint")
+            if mp in ("/", "/boot", "/boot/firmware"):
+                continue  # never treat the boot drive as a backup target
+            if mp:
+                mounts.append(Path(mp))
+                continue
+            target = Path("/media") / part["name"]
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                r = subprocess.run(
+                    ["mount", f"/dev/{part['name']}", str(target)],
+                    capture_output=True, text=True, timeout=15,
+                )
+            except Exception as e:
+                log.error("Mounting /dev/%s failed: %s", part["name"], e)
+                continue
+            if r.returncode == 0:
+                log.info("Mounted /dev/%s → %s", part["name"], target)
+                mounts.append(target)
+            else:
+                log.warning("Could not mount /dev/%s: %s", part["name"], r.stderr.strip())
+    return mounts
 
 
 def _generate_thumbnail(video_path: Path):
@@ -308,6 +344,9 @@ def _copy_to_usb(video_path: Path):
                 log.info("USB backup: %s → %s", f.name, mount.name)
             except Exception as e:
                 log.error("USB copy failed (%s): %s", f.name, e)
+
+    # flush to the stick now, so yanking it without unmounting loses nothing
+    os.sync()
 
 
 def _post_process(video_path: Path):
