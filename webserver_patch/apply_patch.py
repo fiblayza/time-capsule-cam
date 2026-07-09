@@ -10,14 +10,21 @@ Patches applied:
 from pathlib import Path
 import sys
 
-UPSTREAM_DIR  = Path(__file__).parent.parent.parent / "rotary-phone-audio-guestbook"
+# Newer upstream images (Dec 2025+, trixie) install to /opt; older ones to /home/admin
+_CANDIDATES = [
+    Path("/opt/rotary-phone-audio-guestbook"),
+    Path(__file__).parent.parent.parent / "rotary-phone-audio-guestbook",
+]
+UPSTREAM_DIR  = next((p for p in _CANDIDATES if p.is_dir()), _CANDIDATES[-1])
 SERVER_PATH   = UPSTREAM_DIR / "webserver" / "server.py"
 BASE_HTML_PATH = UPSTREAM_DIR / "webserver" / "templates" / "base.html"
 
 # ── Patch 1: blueprint registration ──────────────────────────────────────────
 
+# Absolute path baked in at patch time — upstream may live in /opt while we
+# stay in /home/admin, so a path relative to server.py can't reach us.
 INJECT_IMPORTS = (
-    "import sys; sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'time-capsule-cam' / 'webserver_patch'))\n"
+    f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
     "from status_api import status_bp\n"
 )
 INJECT_REGISTER = "app.register_blueprint(status_bp)\n"

@@ -31,8 +31,14 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent.parent / "rotary-phone-audio-guestbook" / "config.yaml"
-RECORDINGS_DIR_FALLBACK = Path(__file__).parent.parent / "recordings"
+# Newer upstream images (Dec 2025+, trixie) install to /opt; older ones to /home/admin
+_UPSTREAM_CANDIDATES = [
+    Path("/opt/rotary-phone-audio-guestbook"),
+    Path(__file__).parent.parent / "rotary-phone-audio-guestbook",
+]
+UPSTREAM_DIR = next((p for p in _UPSTREAM_CANDIDATES if p.is_dir()), _UPSTREAM_CANDIDATES[-1])
+CONFIG_PATH = UPSTREAM_DIR / "config.yaml"
+RECORDINGS_DIR_FALLBACK = UPSTREAM_DIR / "recordings"
 STATUS_PATH = Path(__file__).parent / "status.json"
 
 _last_stop_time = 0.0        # monotonic time of last stop, for cooldown

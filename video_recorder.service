@@ -5,12 +5,14 @@ Wants=audioGuestBook.service
 
 [Service]
 ExecStart=/usr/bin/python3 /home/admin/time-capsule-cam/video_recorder.py
-WorkingDirectory=/home/admin
+WorkingDirectory=/home/admin/time-capsule-cam
 StandardOutput=journal
 StandardError=journal
 Restart=always
 RestartSec=5
-User=admin
+# root: recordings dir and config.yaml are root-owned on the /opt-based
+# images, and upstream's own services run as root too
+User=root
 
 [Install]
 WantedBy=multi-user.target

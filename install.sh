@@ -12,7 +12,9 @@ set -euo pipefail
 # ── Config ────────────────────────────────────────────────────────────────────
 REPO_URL="https://github.com/fiblayza/time-capsule-cam"
 INSTALL_DIR="/home/admin/time-capsule-cam"
-UPSTREAM_DIR="/home/admin/rotary-phone-audio-guestbook"
+# Newer upstream images (Dec 2025+, trixie) install to /opt; older ones to /home/admin
+UPSTREAM_DIR="/opt/rotary-phone-audio-guestbook"
+[ -d "$UPSTREAM_DIR" ] || UPSTREAM_DIR="/home/admin/rotary-phone-audio-guestbook"
 CONFIG_YAML="${UPSTREAM_DIR}/config.yaml"
 SERVICE_NAME="video_recorder"
 
@@ -70,7 +72,9 @@ fi
 
 # ── 4. Python dependencies ────────────────────────────────────────────────────
 log "Installing Python dependencies..."
-pip3 install --break-system-packages --quiet -r "${INSTALL_DIR}/requirements.txt"
+# sudo: the service runs as root, so packages must land system-wide,
+# not in admin's ~/.local
+sudo pip3 install --break-system-packages --quiet -r "${INSTALL_DIR}/requirements.txt"
 ok "Python deps ready"
 
 # ── 5. Add video: section to config.yaml (idempotent) ─────────────────────────
@@ -78,7 +82,7 @@ if grep -q "^video:" "$CONFIG_YAML"; then
     warn "video: section already present in config.yaml — skipping"
 else
     log "Adding video: section to config.yaml..."
-    cat >> "$CONFIG_YAML" << 'EOF'
+    sudo tee -a "$CONFIG_YAML" > /dev/null << 'EOF'
 
 # ── time-capsule-cam additions ────────────────────────────────────────────────
 video:
@@ -106,7 +110,7 @@ fi
 
 # ── 7. Patch upstream webserver ───────────────────────────────────────────────
 log "Patching upstream webserver/server.py..."
-python3 "${INSTALL_DIR}/webserver_patch/apply_patch.py"
+sudo python3 "${INSTALL_DIR}/webserver_patch/apply_patch.py"
 ok "Webserver patched"
 
 # ── 8. Install and start systemd service ──────────────────────────────────────
