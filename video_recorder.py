@@ -350,22 +350,44 @@ def make_hook_callback(cfg: dict):
     return callback
 
 
-def setup_gpio(cfg: dict):
+def setup_gpio(cfg: dict) -> int:
     global _led_pin
     hook_pin = cfg.get("hook_gpio", 22)
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(hook_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    callback = make_hook_callback(cfg)
-    # same debounce as upstream (hook_bounce_time is in seconds)
-    bounce_ms = int(float(cfg.get("hook_bounce_time") or 0.1) * 1000)
-    GPIO.add_event_detect(hook_pin, GPIO.BOTH, callback=callback, bouncetime=bounce_ms)
-    log.info("GPIO %d watching for hook events", hook_pin)
 
     led = cfg.get("video", {}).get("led_gpio", 0)
     if led:
         _led_pin = led
         GPIO.setup(_led_pin, GPIO.OUT, initial=GPIO.LOW)
         log.info("GPIO %d configured as recording LED", _led_pin)
+
+    return hook_pin
+
+
+def poll_hook(cfg: dict, hook_pin: int):
+    # ponytail: 50 ms polling instead of edge detection — trixie's kernel
+    # dropped the sysfs interface RPi.GPIO events need, and upstream holds
+    # the pin via lgpio so we can't claim it either. Register reads through
+    # /dev/gpiomem claim nothing and coexist with upstream.
+    callback = make_hook_callback(cfg)
+    bounce = float(cfg.get("hook_bounce_time") or 0.1)
+    stable = GPIO.input(hook_pin)
+    changed_at = None
+    log.info("GPIO %d polling for hook changes (debounce %.2fs)", hook_pin, bounce)
+    while True:
+        val = GPIO.input(hook_pin)
+        if val == stable:
+            changed_at = None
+        else:
+            now = time.monotonic()
+            if changed_at is None:
+                changed_at = now
+            elif now - changed_at >= bounce:
+                stable = val
+                changed_at = None
+                callback(hook_pin)
+        time.sleep(0.05)
 
 
 def shutdown(signum, frame):
@@ -392,9 +414,9 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
 
     if GPIO_AVAILABLE:
-        setup_gpio(cfg)
+        hook_pin = setup_gpio(cfg)
         log.info("video_recorder running — waiting for hook events")
-        signal.pause()
+        poll_hook(cfg, hook_pin)
     else:
         log.warning("GPIO unavailable — idle loop (dev mode)")
         while True:
