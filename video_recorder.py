@@ -205,6 +205,11 @@ def _stop_recording_locked(cfg: dict):
             _picamera = None
 
     if _recording_proc is not None:
+        if _recording_proc.poll() is not None:
+            log.error(
+                "ffmpeg had already exited (code %s) — camera missing or capture failed; see ffmpeg.log",
+                _recording_proc.returncode,
+            )
         try:
             _recording_proc.terminate()
             _recording_proc.wait(timeout=10)
@@ -218,7 +223,10 @@ def _stop_recording_locked(cfg: dict):
 
     saved_file = _current_file
 
-    if saved_file and duration < min_dur:
+    if saved_file and not saved_file.exists():
+        log.error("No video file was produced (%s) — nothing saved", saved_file)
+        saved_file = None
+    elif saved_file and duration < min_dur:
         log.info("Recording too short (%.1fs < %ds) — deleting %s", duration, min_dur, saved_file)
         try:
             saved_file.unlink(missing_ok=True)
@@ -376,6 +384,13 @@ def poll_hook(cfg: dict, hook_pin: int):
     changed_at = None
     log.info("GPIO %d polling for hook changes (debounce %.2fs)", hook_pin, bounce)
     while True:
+        # ffmpeg crash detection: without this, status stays "recording"
+        # with nothing capturing until the guest hangs up
+        if _recording_proc is not None and _recording_proc.poll() is not None:
+            log.error("ffmpeg exited unexpectedly (code %s) — resetting", _recording_proc.returncode)
+            stop_recording(cfg)
+            set_led(False)
+
         val = GPIO.input(hook_pin)
         if val == stable:
             changed_at = None
