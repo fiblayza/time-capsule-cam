@@ -73,9 +73,9 @@ fi
 
 # ── 4. Python dependencies ────────────────────────────────────────────────────
 log "Installing Python dependencies..."
-# sudo: the service runs as root, so packages must land system-wide,
-# not in admin's ~/.local
-sudo pip3 install --break-system-packages --quiet -r "${INSTALL_DIR}/requirements.txt"
+# apt, not pip: the trixie image ships without pip3, and apt packages are
+# system-wide so the root service sees them
+sudo apt-get install -y --no-install-recommends python3-yaml python3-rpi.gpio > /dev/null
 ok "Python deps ready"
 
 # ── 5. Add video: section to config.yaml (idempotent) ─────────────────────────
