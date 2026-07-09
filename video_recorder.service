@@ -1,7 +1,8 @@
 [Unit]
 Description=Wedding Phone Video Recorder
-After=network.target audioGuestBook.service
-Wants=audioGuestBook.service
+# No After=audioGuestBook.service: upstream's unit has After=multi-user.target,
+# so depending on it creates an ordering cycle and systemd deletes our start
+# job at boot. We don't need it anyway — the sidecar only polls GPIO and files.
 
 [Service]
 ExecStart=/usr/bin/python3 /home/admin/time-capsule-cam/video_recorder.py
