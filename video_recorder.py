@@ -422,6 +422,12 @@ def poll_hook(cfg: dict, hook_pin: int):
     stable = GPIO.input(hook_pin)
     changed_at = None
     log.info("GPIO %d polling for hook changes (debounce %.2fs)", hook_pin, bounce)
+
+    # handset already lifted when we start (e.g. service restarted mid-call):
+    # record now instead of waiting for the next hang-up/lift cycle
+    if _is_off_hook(stable, cfg.get("hook_type", "NC"), bool(cfg.get("invert_hook", False))):
+        log.info("Handset already off the hook at startup — starting recording")
+        callback(hook_pin)
     while True:
         # ffmpeg crash detection: without this, status stays "recording"
         # with nothing capturing until the guest hangs up
