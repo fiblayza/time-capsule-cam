@@ -372,9 +372,16 @@ def make_hook_callback(cfg: dict):
         val = GPIO.input(channel)
         if _is_off_hook(val, hook_type, invert):
             cooldown = cfg.get("video", {}).get("min_gap_seconds", 1.0)
-            if time.monotonic() - _last_stop_time < cooldown:
-                log.warning("Off-hook ignored — cooldown active, wait %.1fs", cooldown)
-                return
+            remaining = cooldown - (time.monotonic() - _last_stop_time)
+            if remaining > 0:
+                # lifted right after the previous hang-up: wait the gap out
+                # instead of dropping the event — the pin won't change again,
+                # so dropping would lose this whole session's video
+                log.info("Off-hook during cooldown — starting in %.1fs", remaining)
+                time.sleep(remaining)
+                if not _is_off_hook(GPIO.input(channel), hook_type, invert):
+                    log.info("Hung up during cooldown wait — nothing to record")
+                    return
             log.info("Off-hook detected")
             set_status("recording")
             set_led(True)
