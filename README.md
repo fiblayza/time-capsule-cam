@@ -87,7 +87,7 @@ ffmpeg output goes to `time-capsule-cam/ffmpeg.log` if you need to debug a captu
 
 ## USB backup
 
-If a USB drive is connected, each session (`.mp4` + `.wav`) is automatically copied to it after the handset is hung up. Works with any drive formatted as **exFAT** or FAT32 — no configuration needed, the Pi auto-mounts it under `/media/admin/<LABEL>`.
+If a USB drive is connected, each session (`.mp4` + `.wav`) is automatically copied to it after the handset is hung up. Works with any drive formatted as **exFAT** or FAT32 — no configuration needed. The sidecar mounts the drive itself at backup time (the headless image has no automounter), so hot-plugging mid-event works, and it syncs after every copy so pulling the stick without unmounting is safe.
 
 Files are copied to a `time-capsule-cam/` folder on the drive. Multiple drives are supported; if none is connected the backup is silently skipped.
 
