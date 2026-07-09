@@ -52,6 +52,7 @@ fi
 
 # ── 3. System dependencies ────────────────────────────────────────────────────
 log "Installing ffmpeg (this may take a minute)..."
+sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends ffmpeg > /dev/null
 ok "ffmpeg ready"
 
