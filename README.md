@@ -7,7 +7,9 @@ Adds synchronized video recording: when a guest lifts the handset, audio **and**
 
 ## Requirements
 
-- Raspberry Pi 4 (2 GB RAM min)
+Montaje físico completo (teléfono, cableados, cámara): **[docs/hardware.md](docs/hardware.md)**.
+
+- Raspberry Pi 4 — 1 GB RAM is enough (the installer raises swap to 1 GB as an OOM guard; 2 GB+ if you want headroom)
 - Upstream image flashed and running: [download here](https://github.com/nickpourazima/rotary-phone-audio-guestbook/releases)
 - USB webcam or Raspberry Pi Camera Module
 
@@ -50,6 +52,13 @@ video:
   led_gpio: 17           # BCM pin for recording LED; 0 to disable
 ```
 
+Two safety behaviours are always on:
+
+- Video is written as **fragmented MP4**, so the file stays playable even if ffmpeg dies mid-recording (power cut, crash).
+- If the handset is left off the hook, video stops automatically at the upstream `recording_limit` (default 300 s) + 10 s, instead of filling the SD card.
+
+For the `picamera` backend install the library via apt, **not pip**: `sudo apt install python3-picamera2`.
+
 Then restart the sidecar:
 
 ```bash
@@ -68,7 +77,11 @@ cat /home/admin/time-capsule-cam/status.json  # {"status": "idle"}
 Lift the handset → status becomes `recording`, an `.mp4` appears in `/recordings/`.  
 Hang up → status goes `saving` → `idle`, file is complete.
 
-The web panel at `http://<PI_IP>:8080` shows a live status badge (polls every 2 s).
+The web panel at `http://<PI_IP>:8080` shows a live status badge (polls every 2 s), and each audio recording gets its paired video player right next to it (matched by timestamp — the video always starts before the audio, since audio only begins after the greeting).
+
+ffmpeg output goes to `time-capsule-cam/ffmpeg.log` if you need to debug a capture problem.
+
+> **⚠ Check on real hardware before the event:** upstream reads the hook pin with `gpiozero` (lgpio backend on Bookworm) and this sidecar uses `RPi.GPIO`. On a Pi 4 they coexist, but if `RPi.GPIO` resolves to the `rpi-lgpio` shim the second reader fails with "GPIO busy". Lift the handset with both services running and confirm both react.
 
 ---
 

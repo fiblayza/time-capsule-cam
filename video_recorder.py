@@ -20,7 +20,7 @@ except ImportError:
 try:
     from picamera2 import Picamera2
     from picamera2.encoders import H264Encoder
-    from picamera2.outputs import FileOutput
+    from picamera2.outputs import FfmpegOutput
     PICAMERA2_AVAILABLE = True
 except ImportError:
     PICAMERA2_AVAILABLE = False
@@ -35,14 +35,17 @@ CONFIG_PATH = Path(__file__).parent.parent / "rotary-phone-audio-guestbook" / "c
 RECORDINGS_DIR_FALLBACK = Path(__file__).parent.parent / "recordings"
 STATUS_PATH = Path(__file__).parent / "status.json"
 
-DEBOUNCE_MS = 200
-_last_event_time = 0.0
 _last_stop_time = 0.0        # monotonic time of last stop, for cooldown
 _recording_proc = None       # ffmpeg subprocess
 _picamera = None             # picamera2 instance
 _recording_start = None      # epoch float
 _current_file = None         # Path of the file being written
 _led_pin = None              # BCM pin for recording LED (None = disabled)
+_limit_timer = None          # threading.Timer that stops runaway recordings
+_lock = threading.Lock()     # hook callback and limit timer can race on stop
+
+# ponytail: single append-only log shared by all ffmpeg runs; rotate by hand if it ever matters
+_FFMPEG_LOG = open(Path(__file__).parent / "ffmpeg.log", "ab")
 
 
 def set_status(state: str):
@@ -85,7 +88,12 @@ def _timestamp() -> str:
 
 
 def start_recording(cfg: dict):
-    global _recording_proc, _picamera, _recording_start, _current_file
+    with _lock:
+        _start_recording_locked(cfg)
+
+
+def _start_recording_locked(cfg: dict):
+    global _recording_proc, _picamera, _recording_start, _current_file, _limit_timer
 
     if _recording_proc is not None or _picamera is not None:
         log.warning("start_recording called while already recording — ignoring")
@@ -111,10 +119,15 @@ def start_recording(cfg: dict):
         _picamera = Picamera2()
         video_config = _picamera.create_video_configuration(
             main={"size": (width, height)},
+            controls={"FrameRate": fps},
         )
         _picamera.configure(video_config)
         encoder = H264Encoder(bitrate=2_000_000)
-        output = FileOutput(str(_current_file))
+        # FfmpegOutput wraps the stream in a real MP4 container — FileOutput
+        # wrote a bare H.264 bitstream that browsers can't play. Fragmented
+        # (same flags as the usb backend) so a crash doesn't corrupt the file.
+        # picamera2 splits this string, so options can ride along with the path.
+        output = FfmpegOutput(f"-movflags +frag_keyframe+empty_moov {_current_file}")
         _picamera.start_recording(encoder, output)
         log.info("picamera2 recording → %s", _current_file)
     else:
@@ -132,22 +145,45 @@ def start_recording(cfg: dict):
             "-i", device,
             "-c:v", codec,
             "-preset", preset,
+            # fragmented MP4: file stays playable even if ffmpeg dies mid-recording
+            "-movflags", "+frag_keyframe+empty_moov",
             str(_current_file),
         ]
         log.info("ffmpeg cmd: %s", " ".join(cmd))
+        # stderr must not be PIPE: unread pipe fills up and freezes ffmpeg
         _recording_proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=_FFMPEG_LOG,
         )
+
+    # safety net: handset left off the hook must not fill the SD card
+    limit = int(cfg.get("recording_limit", 300)) + 10  # margin over upstream audio limit
+    _limit_timer = threading.Timer(limit, _on_limit_reached, args=(cfg, limit))
+    _limit_timer.daemon = True
+    _limit_timer.start()
+
+
+def _on_limit_reached(cfg: dict, limit: int):
+    log.warning("Recording hit %ds limit — stopping video (handset off the hook?)", limit)
+    stop_recording(cfg)
 
 
 def stop_recording(cfg: dict):
-    global _recording_proc, _picamera, _recording_start, _current_file, _last_stop_time
+    with _lock:
+        _stop_recording_locked(cfg)
+
+
+def _stop_recording_locked(cfg: dict):
+    global _recording_proc, _picamera, _recording_start, _current_file, _last_stop_time, _limit_timer
 
     if _recording_proc is None and _picamera is None and _current_file is None:
         log.warning("stop_recording called but nothing was recording — ignoring")
         return
+
+    if _limit_timer is not None:
+        _limit_timer.cancel()
+        _limit_timer = None
 
     set_status("saving")
     duration = time.monotonic() - (_recording_start or 0)
@@ -192,7 +228,8 @@ def stop_recording(cfg: dict):
     set_status("idle")
 
     if saved_file:
-        threading.Thread(target=_post_process, args=(saved_file,), daemon=True).start()
+        # non-daemon so a shutdown mid-backup waits for the copy to finish
+        threading.Thread(target=_post_process, args=(saved_file,), daemon=False).start()
 
 
 def _find_usb_mounts() -> list:
@@ -264,26 +301,23 @@ def _post_process(video_path: Path):
     _copy_to_usb(video_path)
 
 
-def _is_off_hook(gpio_val: int, hook_type: str) -> bool:
+def _is_off_hook(gpio_val: int, hook_type: str, invert: bool = False) -> bool:
     # NC (normally closed): pin goes HIGH when handset is lifted
     # NO (normally open):   pin goes LOW  when handset is lifted
     if hook_type.upper() == "NC":
-        return gpio_val == GPIO.HIGH
-    return gpio_val == GPIO.LOW
+        off = gpio_val == GPIO.HIGH
+    else:
+        off = gpio_val == GPIO.LOW
+    return not off if invert else off
 
 
 def make_hook_callback(cfg: dict):
     hook_type = cfg.get("hook_type", "NC")
+    invert = bool(cfg.get("invert_hook", False))
 
     def callback(channel):
-        global _last_event_time
-        now = time.monotonic()
-        if now - _last_event_time < DEBOUNCE_MS / 1000:
-            return
-        _last_event_time = now
-
         val = GPIO.input(channel)
-        if _is_off_hook(val, hook_type):
+        if _is_off_hook(val, hook_type, invert):
             cooldown = cfg.get("video", {}).get("min_gap_seconds", 1.0)
             if time.monotonic() - _last_stop_time < cooldown:
                 log.warning("Off-hook ignored — cooldown active, wait %.1fs", cooldown)
@@ -316,7 +350,9 @@ def setup_gpio(cfg: dict):
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(hook_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     callback = make_hook_callback(cfg)
-    GPIO.add_event_detect(hook_pin, GPIO.BOTH, callback=callback, bouncetime=DEBOUNCE_MS)
+    # same debounce as upstream (hook_bounce_time is in seconds)
+    bounce_ms = int(float(cfg.get("hook_bounce_time") or 0.1) * 1000)
+    GPIO.add_event_detect(hook_pin, GPIO.BOTH, callback=callback, bouncetime=bounce_ms)
     log.info("GPIO %d watching for hook events", hook_pin)
 
     led = cfg.get("video", {}).get("led_gpio", 0)

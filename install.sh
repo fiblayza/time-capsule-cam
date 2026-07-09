@@ -53,6 +53,21 @@ log "Installing ffmpeg (this may take a minute)..."
 sudo apt-get install -y --no-install-recommends ffmpeg > /dev/null
 ok "ffmpeg ready"
 
+# ── 3b. Swap — the panel's "Download All" zips recordings in RAM; on 1 GB
+# models that can trigger the OOM killer mid-recording. 1 GB swap absorbs it. ──
+if [ -f /etc/dphys-swapfile ]; then
+    if grep -q '^CONF_SWAPSIZE=1024' /etc/dphys-swapfile; then
+        warn "Swap already at 1024 MB — skipping"
+    else
+        log "Raising swap to 1024 MB (takes a moment)..."
+        sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=1024/' /etc/dphys-swapfile
+        sudo systemctl restart dphys-swapfile
+        ok "Swap: 1024 MB"
+    fi
+else
+    warn "dphys-swapfile not found — skipping swap resize"
+fi
+
 # ── 4. Python dependencies ────────────────────────────────────────────────────
 log "Installing Python dependencies..."
 pip3 install --break-system-packages --quiet -r "${INSTALL_DIR}/requirements.txt"

@@ -27,7 +27,7 @@ MARKER_REGISTER = "# [time-capsule-cam] status blueprint register"
 
 # ── Patch 2: dynamic MIME type in serve_recording ─────────────────────────────
 
-MIME_DETECT_LINE = "    mime_type = 'video/mp4' if filename.lower().endswith('.mp4') else 'audio/wav'\n"
+MIME_DETECT_LINE = "    mime_type = {'.mp4': 'video/mp4', '.jpg': 'image/jpeg'}.get(Path(filename).suffix.lower(), 'audio/wav')\n"
 MIME_ANCHOR      = "    file_size = file_path.stat().st_size\n"
 MARKER_MIME      = "# [time-capsule-cam] dynamic mime type"
 
@@ -84,6 +84,7 @@ POLL_JS = f"""{MARKER_POLL}
     setInterval(poll, 2000);
   }})();
 </script>
+<script src="/tcc/videos.js" defer></script>
 </html>"""
 
 
@@ -100,10 +101,12 @@ def patch_blueprint(src: str) -> str:
     lines.insert(last_import_idx + 1, insert_block)
 
     src2 = "".join(lines)
-    flask_init_marker = "app = Flask("
-    idx = src2.find(flask_init_marker)
+    # anchor on app.secret_key: it's a single line, whereas `app = Flask(`
+    # spans several — inserting after its first line would break the call
+    register_anchor = "app.secret_key"
+    idx = src2.find(register_anchor)
     if idx == -1:
-        sys.exit("ERROR: Could not find `app = Flask(` in server.py")
+        sys.exit("ERROR: Could not find `app.secret_key` in server.py")
     eol = src2.index("\n", idx)
     register_block = f"\n{MARKER_REGISTER}\n{INJECT_REGISTER}"
     return src2[:eol + 1] + register_block + src2[eol + 1:]

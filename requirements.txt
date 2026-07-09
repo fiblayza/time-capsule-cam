@@ -1,5 +1,4 @@
 RPi.GPIO>=0.7.1
-picamera2>=0.3.12
-opencv-python-headless>=4.8.0
 pyyaml>=6.0
-flask>=3.0.0
+# picamera backend: install via apt, NOT pip (pip build breaks on Bookworm):
+#   sudo apt install python3-picamera2
