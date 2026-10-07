@@ -77,7 +77,9 @@ Los números de GPIO son BCM (los que usa `config.yaml`); los "pin" son la posic
 
 No hace falta resistencia: el software activa la pull-up interna del pin. Ambos procesos (audio del upstream y vídeo de esta extensión) leen este mismo pin de forma independiente.
 
-> El resto de la placa del teléfono (teclado, timbre, melodías) queda sin uso y sin alimentación. No desueldes nada más: el switch puede seguir soldado a su placa, los contactos son libres de tensión al no haber línea conectada.
+> El resto de la placa del teléfono (teclado, timbre, melodías) queda sin uso y sin alimentación.
+
+**Importante — aísla el switch de la placa:** aunque la placa esté sin alimentar, sus pistas y componentes forman un camino *resistivo* en paralelo con el contacto del gancho. Unos pocos kΩ en paralelo no hacen pitar el multímetro en continuidad, pero bastan para vencer la pull-up interna (~50 kΩ) y dejar el GPIO clavado a nivel bajo aunque descuelgues. Desuelda y levanta **una pata** del par que uses (el switch queda sujeto por las demás), suelda tu hilo a la pata levantada y aíslala con termorretráctil. Verificación: con el auricular **descolgado**, el multímetro en modo **ohmios** entre los dos hilos debe marcar **OL/infinito** — cualquier valor finito significa que sigue habiendo camino por la placa.
 
 ---
 
