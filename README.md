@@ -115,6 +115,22 @@ Change the pin in `config.yaml` (`led_gpio: <pin>`), or set `led_gpio: 0` to dis
 
 ---
 
+## Wifi setup by QR code
+
+To put the phone on a new wifi without a screen or SSH:
+
+1. Lift the handset, **then** plug the Pi in. Keep the handset up.
+2. After ~10 s a voice confirms setup mode and the LED flickers. Nothing is recorded in this mode.
+3. Hold the wifi QR code in front of the camera (Android: *Share wifi*; iOS: *Passwords → Wi-Fi → Show Network QR Code*).
+4. The LED goes solid while it connects — up to a minute away from the home network. A voice announces the result.
+5. Hang up. The network is saved for later boots.
+
+Hanging up at any point leaves setup mode; so does the 2-minute timeout. A code that fails to connect is not saved.
+
+Needs the `picamera` backend and `python3-pyzbar` (installed by `install.sh`).
+
+---
+
 ## How it works
 
 ```

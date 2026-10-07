@@ -75,7 +75,7 @@ fi
 log "Installing Python dependencies..."
 # apt, not pip: the trixie image ships without pip3, and apt packages are
 # system-wide so the root service sees them
-sudo apt-get install -y --no-install-recommends python3-yaml python3-rpi.gpio > /dev/null
+sudo apt-get install -y --no-install-recommends python3-yaml python3-rpi.gpio python3-pyzbar > /dev/null
 ok "Python deps ready"
 
 # ── 5. Add video: section to config.yaml (idempotent) ─────────────────────────

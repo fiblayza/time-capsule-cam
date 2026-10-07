@@ -1,5 +1,5 @@
 # Installed via apt by install.sh (the trixie image has no pip3):
-#   sudo apt install python3-yaml python3-rpi.gpio
+#   sudo apt install python3-yaml python3-rpi.gpio python3-pyzbar
 # picamera backend, also via apt:
 #   sudo apt install python3-picamera2
 RPi.GPIO>=0.7.1

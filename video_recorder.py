@@ -11,6 +11,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import wifi_qr
+
 try:
     import RPi.GPIO as GPIO
     GPIO_AVAILABLE = True
@@ -41,8 +43,14 @@ UPSTREAM_DIR = next((p for p in _UPSTREAM_CANDIDATES if p.is_dir()), _UPSTREAM_C
 CONFIG_PATH = UPSTREAM_DIR / "config.yaml"
 RECORDINGS_DIR_FALLBACK = UPSTREAM_DIR / "recordings"
 STATUS_PATH = Path(__file__).parent / "status.json"
+SOUNDS_DIR = Path(__file__).parent / "sounds"
 
-_last_stop_time = 0.0        # monotonic time of last stop, for cooldown
+# time.monotonic() counts from power-on: a handset already lifted this early
+# means "plugged in with the handset up" (wifi setup), not a mid-call restart
+BOOT_WINDOW_SECONDS = 60
+WIFI_SETUP_TIMEOUT_SECONDS = 120
+
+_last_stop_time = 0.0       # monotonic time of last stop, for cooldown
 _recording_proc = None       # ffmpeg subprocess
 _picamera = None             # picamera2 instance
 _recording_start = None      # epoch float
@@ -500,6 +508,89 @@ def _wait_for_wav(cfg: dict, channel: int, hook_type: str, invert: bool) -> bool
     return True
 
 
+def _say(cfg: dict, name: str):
+    """Spoken prompt through the handset. Best effort — the LED shows the
+    same states, so wifi setup still works with a dead earpiece."""
+    try:
+        subprocess.run(
+            ["aplay", "-q", "-D", cfg.get("alsa_hw_mapping", "default"), str(SOUNDS_DIR / f"{name}.wav")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20,
+        )
+    except Exception as e:
+        log.warning("Prompt %s failed: %s", name, e)
+
+
+def _wifi_setup(cfg: dict, hook_pin: int):
+    """Plugged in with the handset lifted: read a wifi QR code with the camera
+    and join that network. Nothing is recorded meanwhile — upstream ignores a
+    handset that was already up when it started, and we never reach the hook
+    callback. Ends on hang-up, on a successful join or on timeout.
+    LED: flickering = looking for a code, solid = connecting."""
+    try:
+        from pyzbar.pyzbar import decode, ZBarSymbol
+    except ImportError:
+        log.error("pyzbar missing (apt install python3-pyzbar) — wifi setup unavailable")
+        return
+    if not PICAMERA2_AVAILABLE:
+        log.error("wifi setup needs the picamera backend")
+        return
+
+    hook_type = cfg.get("hook_type", "NC")
+    invert = bool(cfg.get("invert_hook", False))
+    log.info("Handset up at power-on — wifi setup mode")
+    set_status("config")
+    cam = None
+    tried = joined = False
+    try:
+        _say(cfg, "wifi_start")
+        cam = Picamera2()
+        # full field of view at half the sensor resolution: a code on a phone
+        # screen at arm's length is too few pixels at the 720p we record in
+        width, height = 2304, 1296
+        cam.configure(cam.create_video_configuration(main={"size": (width, height), "format": "YUV420"}))
+        if "AfMode" in cam.camera_controls:
+            cam.set_controls({"AfMode": 2})  # continuous autofocus
+        cam.start()
+        deadline = time.monotonic() + WIFI_SETUP_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if not _is_off_hook(GPIO.input(hook_pin), hook_type, invert):
+                log.info("Hung up — leaving wifi setup")
+                return
+            set_led(int(time.monotonic() * 5) % 2 == 0)
+            # YUV420: the first `height` rows are the luma plane, i.e. grayscale
+            gray = cam.capture_array("main")[:height, :width]
+            for code in decode(gray, symbols=[ZBarSymbol.QRCODE]):
+                net = wifi_qr.parse(code.data.decode("utf-8", "replace"))
+                if net is None:
+                    continue
+                log.info("Read wifi code for %r", net["S"])
+                set_led(True)
+                _say(cfg, "wifi_connecting")
+                tried = True
+                joined = wifi_qr.join(net["S"], net.get("P", ""), net.get("H", "").lower() == "true")
+                if joined:
+                    _say(cfg, "wifi_ok")
+                    return
+                # same code still in view → retried on the next frame
+                _say(cfg, "wifi_fail")
+                break
+        log.info("wifi setup timed out")
+        _say(cfg, "wifi_timeout")
+    except Exception as e:
+        log.error("wifi setup failed: %s", e)
+    finally:
+        if cam is not None:
+            try:
+                cam.stop()
+                cam.close()
+            except Exception as e:
+                log.error("picamera2 close error: %s", e)
+        if tried and not joined:
+            wifi_qr.restore()
+        set_led(False)
+        set_status("idle")
+
+
 def make_hook_callback(cfg: dict):
     hook_type = cfg.get("hook_type", "NC")
     invert = bool(cfg.get("invert_hook", False))
@@ -569,11 +660,16 @@ def poll_hook(cfg: dict, hook_pin: int):
     changed_at = None
     log.info("GPIO %d polling for hook changes (debounce %.2fs)", hook_pin, bounce)
 
-    # handset already lifted when we start (e.g. service restarted mid-call):
-    # record now instead of waiting for the next hang-up/lift cycle
     if _is_off_hook(stable, cfg.get("hook_type", "NC"), bool(cfg.get("invert_hook", False))):
-        log.info("Handset already off the hook at startup — starting recording")
-        callback(hook_pin)
+        if time.monotonic() < BOOT_WINDOW_SECONDS:
+            _wifi_setup(cfg, hook_pin)
+            # whatever the handset does next is an ordinary hook change
+            stable = GPIO.input(hook_pin)
+        else:
+            # handset already lifted when we start (e.g. service restarted
+            # mid-call): record now instead of waiting for the next lift
+            log.info("Handset already off the hook at startup — starting recording")
+            callback(hook_pin)
     cfg_mtime = CONFIG_PATH.stat().st_mtime if CONFIG_PATH.exists() else 0
     while True:
         # the web panel edits config.yaml (e.g. invert_hook) and only restarts
