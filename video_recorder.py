@@ -49,6 +49,8 @@ _recording_start = None      # epoch float
 _current_file = None         # Path of the file being written
 _led_pin = None              # BCM pin for recording LED (None = disabled)
 _limit_timer = None          # threading.Timer that stops runaway recordings
+_wav_detected_at = None      # monotonic instant the audio .wav appeared
+_av_offset = 0.0             # seconds the camera started after the audio did
 _lock = threading.Lock()     # hook callback and limit timer can race on stop
 
 # ponytail: single append-only log shared by all ffmpeg runs; rotate by hand if it ever matters
@@ -164,6 +166,14 @@ def _start_recording_locked(cfg: dict):
             stderr=_FFMPEG_LOG,
         )
 
+    # camera setup takes ~0.3-0.5s after the .wav appeared — remember the gap
+    # so the mux can trim it off the audio, otherwise sound lags the image
+    global _av_offset
+    if _wav_detected_at is not None:
+        _av_offset = min(max(time.monotonic() - _wav_detected_at, 0.0), 5.0)
+    else:
+        _av_offset = 0.0
+
     # safety net: handset left off the hook must not fill the SD card
     limit = int(cfg.get("recording_limit", 300)) + 10  # margin over upstream audio limit
     _limit_timer = threading.Timer(limit, _on_limit_reached, args=(cfg, limit))
@@ -244,7 +254,7 @@ def _stop_recording_locked(cfg: dict):
 
     if saved_file:
         # non-daemon so a shutdown mid-backup waits for the copy to finish
-        threading.Thread(target=_post_process, args=(saved_file,), daemon=False).start()
+        threading.Thread(target=_post_process, args=(saved_file, _av_offset), daemon=False).start()
 
 
 def _find_usb_mounts() -> list:
@@ -314,21 +324,82 @@ def _generate_thumbnail(video_path: Path):
         log.error("Thumbnail failed: %s", e)
 
 
-def _copy_to_usb(video_path: Path):
-    time.sleep(3)  # give upstream audioGuestBook time to finish writing the .wav
+def _find_paired_wav(video_path: Path) -> Path | None:
+    # upstream names wavs with its own timestamp, so stems never match —
+    # pair by mtime proximity: calls are serialized, both files stop at the
+    # same hang-up, so the wav that finished nearest our mp4 is the pair
+    try:
+        mp4_mtime = video_path.stat().st_mtime
+        wavs = [w for w in video_path.parent.glob("*.wav")
+                if abs(w.stat().st_mtime - mp4_mtime) < 30]
+        return max(wavs, key=lambda w: w.stat().st_mtime) if wavs else None
+    except OSError:
+        return None
 
+
+def _ffprobe_duration(path: Path, stream: str | None = None) -> float | None:
+    cmd = ["ffprobe", "-v", "error"]
+    if stream:
+        cmd += ["-select_streams", stream, "-show_entries", "stream=duration"]
+    else:
+        cmd += ["-show_entries", "format=duration"]
+    cmd += ["-of", "csv=p=0", str(path)]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout.strip().splitlines()
+        return float(out[0]) if out else None
+    except Exception:
+        return None
+
+
+def _mux_audio(video_path: Path, av_offset: float = 0.0):
+    """Merge the paired .wav into the mp4 (video stream copied, audio → AAC).
+    Runs post-hangup so it never competes with a live recording. The original
+    .wav is kept — the web panel's audio player still uses it. av_offset
+    trims the head of the audio: the camera starts that many seconds after
+    arecord did, so without the trim sound lags the image and the video
+    freezes at the end while the leftover audio plays out."""
+    wav = _find_paired_wav(video_path)
+    if wav is None:
+        log.info("No paired .wav for %s — leaving video silent", video_path.name)
+        return
+    tmp = video_path.with_suffix(".mux.mp4")
+    # both streams stop on the same hang-up, so their duration difference IS
+    # the real start lag (hook poll + camera/encoder spin-up). Measuring the
+    # files beats the process-timing estimate (av_offset), which misses the
+    # encoder startup; av_offset stays as fallback if ffprobe fails.
+    wav_dur = _ffprobe_duration(wav)
+    vid_dur = _ffprobe_duration(video_path, "v")
+    if wav_dur and vid_dur:
+        av_offset = min(max(wav_dur - vid_dur, 0.0), 5.0)
+    trim = ["-ss", f"{av_offset:.3f}"] if av_offset > 0.05 else []
+    if trim:
+        log.info("Muxing with %.3fs audio head trim (camera start lag)", av_offset)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(video_path), *trim, "-i", str(wav),
+             "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+             "-movflags", "+faststart", str(tmp)],
+            stdout=subprocess.DEVNULL, stderr=_FFMPEG_LOG, timeout=120,
+        )
+        if tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(video_path)
+            log.info("Muxed %s into %s", wav.name, video_path.name)
+        else:
+            raise RuntimeError("ffmpeg produced no output")
+    except Exception as e:
+        log.error("Mux failed (%s) — keeping separate tracks", e)
+        tmp.unlink(missing_ok=True)
+
+
+def _copy_to_usb(video_path: Path):
     mounts = _find_usb_mounts()
     if not mounts:
         log.info("No USB drives mounted — skipping backup")
         return
 
-    stem = video_path.stem
-    recordings_dir = video_path.parent
-    candidates = [
-        video_path,
-        video_path.with_suffix(".jpg"),
-        recordings_dir / f"{stem}.wav",
-    ]
+    wav = _find_paired_wav(video_path)
+    candidates = [video_path, video_path.with_suffix(".jpg")] + ([wav] if wav else [])
     files = [f for f in candidates if f.exists()]
 
     for mount in mounts:
@@ -349,19 +420,84 @@ def _copy_to_usb(video_path: Path):
     os.sync()
 
 
-def _post_process(video_path: Path):
+# measured on the AB13X dongle 2026-08-16: mains hum at 150/250/450 Hz that
+# enters after the gain stage, so it must be filtered out, not gained out.
+# Voice starts ~300 Hz, so the double highpass (24 dB/oct at 200) is safe.
+# The dongle's internal AGC clips the ADC on shouting no matter the mixer
+# gain: adeclip reconstructs the flat-topped peaks (in float) and the
+# trailing limiter keeps the rebuilt peaks inside 16-bit on the way out.
+_HUM_FILTER = ("adeclip,highpass=f=200,highpass=f=200,"
+               "equalizer=f=250:t=h:w=60:g=-14,equalizer=f=450:t=h:w=60:g=-12,"
+               "alimiter=limit=0.92:level=false")
+
+
+def _filter_wav(video_path: Path):
+    """Strip mains hum from the paired .wav in place, so both the web panel's
+    audio player and the later mux get the clean track."""
+    wav = _find_paired_wav(video_path)
+    if wav is None:
+        return
+    tmp = wav.with_name(wav.name + ".tmp")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(wav), "-af", _HUM_FILTER,
+             "-c:a", "pcm_s16le", "-f", "wav", str(tmp)],
+            stdout=subprocess.DEVNULL, stderr=_FFMPEG_LOG, timeout=120,
+        )
+        if tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(wav)
+            log.info("Hum-filtered %s", wav.name)
+        else:
+            raise RuntimeError("ffmpeg produced no output")
+    except Exception as e:
+        log.error("Hum filter failed (%s) — keeping raw audio", e)
+        tmp.unlink(missing_ok=True)
+
+
+def _post_process(video_path: Path, av_offset: float = 0.0):
+    time.sleep(3)  # let upstream's arecord finish flushing the .wav
+    _filter_wav(video_path)
+    _mux_audio(video_path, av_offset)
     _generate_thumbnail(video_path)
     _copy_to_usb(video_path)
 
 
 def _is_off_hook(gpio_val: int, hook_type: str, invert: bool = False) -> bool:
-    # NC (normally closed): pin goes HIGH when handset is lifted
-    # NO (normally open):   pin goes LOW  when handset is lifted
+    # Same convention as upstream audioGuestBook.is_on_hook:
+    # NC: HIGH = on-hook (handset down), LOW = off-hook
+    # NO: LOW  = on-hook, HIGH = off-hook
     if hook_type.upper() == "NC":
-        off = gpio_val == GPIO.HIGH
-    else:
         off = gpio_val == GPIO.LOW
+    else:
+        off = gpio_val == GPIO.HIGH
     return not off if invert else off
+
+
+def _wait_for_wav(cfg: dict, channel: int, hook_type: str, invert: bool) -> bool:
+    """Block until upstream's arecord creates its .wav (i.e. after greeting+beep),
+    so video starts at the same moment as audio. Returns False if the guest
+    hangs up while waiting. On timeout starts anyway — a broken mic must not
+    also cost us the video."""
+    recordings_dir = Path(cfg.get("recordings_path", str(RECORDINGS_DIR_FALLBACK)))
+    before = set(recordings_dir.glob("*.wav"))
+    # ponytail: 30s hardcoded — greeting+beep is ~11s; make it a config knob
+    # if someone records a longer greeting
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        # blink the LED while the greeting/beep plays; caller sets it solid
+        # once recording actually starts
+        set_led(int(time.monotonic() * 2.5) % 2 == 0)
+        if not _is_off_hook(GPIO.input(channel), hook_type, invert):
+            set_led(False)
+            return False
+        if set(recordings_dir.glob("*.wav")) - before:
+            global _wav_detected_at
+            _wav_detected_at = time.monotonic()
+            return True
+        time.sleep(0.1)
+    log.warning("No new .wav within 30s — is audio broken? Starting video anyway")
+    _wav_detected_at = None
+    return True
 
 
 def make_hook_callback(cfg: dict):
@@ -382,7 +518,10 @@ def make_hook_callback(cfg: dict):
                 if not _is_off_hook(GPIO.input(channel), hook_type, invert):
                     log.info("Hung up during cooldown wait — nothing to record")
                     return
-            log.info("Off-hook detected")
+            log.info("Off-hook detected — waiting for audio .wav (greeting+beep)")
+            if not _wait_for_wav(cfg, channel, hook_type, invert):
+                log.info("Hung up before the beep — nothing to record")
+                return
             set_status("recording")
             set_led(True)
             try:
@@ -435,7 +574,20 @@ def poll_hook(cfg: dict, hook_pin: int):
     if _is_off_hook(stable, cfg.get("hook_type", "NC"), bool(cfg.get("invert_hook", False))):
         log.info("Handset already off the hook at startup — starting recording")
         callback(hook_pin)
+    cfg_mtime = CONFIG_PATH.stat().st_mtime if CONFIG_PATH.exists() else 0
     while True:
+        # the web panel edits config.yaml (e.g. invert_hook) and only restarts
+        # the audio service — re-read here so both processes stay in sync
+        try:
+            mtime = CONFIG_PATH.stat().st_mtime
+        except OSError:
+            mtime = cfg_mtime
+        if mtime != cfg_mtime:
+            cfg_mtime = mtime
+            cfg = load_config()
+            callback = make_hook_callback(cfg)
+            bounce = float(cfg.get("hook_bounce_time") or 0.1)
+            log.info("config.yaml changed — reloaded (invert_hook=%s)", cfg.get("invert_hook"))
         # ffmpeg crash detection: without this, status stays "recording"
         # with nothing capturing until the guest hangs up
         if _recording_proc is not None and _recording_proc.poll() is not None:

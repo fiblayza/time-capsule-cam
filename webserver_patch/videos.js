@@ -30,6 +30,8 @@
 
     var audio = row.querySelector("audio, .plyr");
     var cell = audio ? audio.closest("td") : row.cells[2];
+    // the muxed mp4 already carries the audio — one player is enough
+    if (audio) audio.style.display = "none";
     if (cell) cell.appendChild(video);
   }
 
